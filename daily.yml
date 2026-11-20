@@ -1,0 +1,37 @@
+name: daily-news-podcast
+on:
+  schedule:
+    - cron: "0 21 * * *"   # 매일 06:00 (한국시간)
+  workflow_dispatch:        # 수동 실행 버튼
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -r requirements.txt
+      - name: 이전 사이트 내려받기
+        run: |
+          git clone --depth 1 --branch gh-pages "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" site || mkdir site
+      - name: 오늘 에피소드 생성
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          OUT_DIR: site
+        run: python news_podcast.py
+      - name: 배포 (gh-pages, 항상 1커밋으로 덮어써서 저장소 용량 유지)
+        run: |
+          cd site
+          rm -rf .git
+          touch .nojekyll
+          git init -q -b gh-pages
+          git config user.name "news-bot"
+          git config user.email "news-bot@users.noreply.github.com"
+          git add -A
+          git commit -q -m "episode $(date -u +%F)"
+          git remote add origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git"
+          git push -f origin gh-pages
