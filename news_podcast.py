@@ -14,6 +14,7 @@ import sys
 import time
 from email.utils import format_datetime
 from pathlib import Path
+from urllib.parse import quote
 from xml.sax.saxutils import escape
 
 import edge_tts
@@ -24,25 +25,30 @@ import requests
 KST = dt.timezone(dt.timedelta(hours=9))
 OUT = Path(os.environ.get("OUT_DIR", "docs"))
 EP = OUT / "episodes"
-TITLE = os.environ.get("PODCAST_TITLE", "오늘의 뉴스 브리핑")
+TITLE = os.environ.get("PODCAST_TITLE", "동남아 뉴스 브리핑")
 VOICES = {
     "A": os.environ.get("VOICE_A", "ko-KR-SunHiNeural"),
     "B": os.environ.get("VOICE_B", "ko-KR-InJoonNeural"),
 }
 RATE = os.environ.get("TTS_RATE", "+5%")
-TARGET_CHARS = int(os.environ.get("TARGET_CHARS", "2400"))  # 약 7~8분 분량
+TARGET_CHARS = int(os.environ.get("TARGET_CHARS", "4000"))  # 약 11~12분 분량
 MAX_PART_BYTES = int(os.environ.get("MAX_PART_BYTES", str(4_000_000)))  # 파일 1개 최대 ~4MB
 KEEP_DAYS = int(os.environ.get("KEEP_DAYS", "14"))
 GEMINI_MODELS = os.environ.get("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite")
 
-G = "https://news.google.com/rss/headlines/section/topic/{}?hl=ko&gl=KR&ceid=KR:ko"
-FEEDS = [  # (섹션 이름, RSS 주소, 최대 기사 수)
-    ("주요 뉴스", "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko", 10),
-    ("국내", G.format("NATION"), 6),
-    ("세계", G.format("WORLD"), 6),
-    ("경제", G.format("BUSINESS"), 6),
-    ("IT·과학", G.format("TECHNOLOGY"), 5),
-    ("연합뉴스", "https://www.yna.co.kr/rss/news.xml", 8),
+def gsearch(q, lang="ko"):
+    tail = "hl=ko&gl=KR&ceid=KR:ko" if lang == "ko" else "hl=en-US&gl=US&ceid=US:en"
+    return f"https://news.google.com/rss/search?q={quote('(' + q + ') when:2d')}&{tail}"
+
+
+HAS_KEY = bool(os.environ.get("GEMINI_API_KEY", "").strip())
+BODY_CHARS = int(os.environ.get("BODY_CHARS", "1500"))  # 기사 1건당 본문 발췌 길이
+FETCH_BUDGET = int(os.environ.get("FETCH_BUDGET", "300"))  # 본문 수집 제한시간(초)
+FEEDS = [  # (섹션 이름, RSS 주소, 최대 기사 수, 본문까지 읽을 기사 수, 영문(AI 번역 필요) 여부)
+    ("인도네시아", gsearch("인도네시아 OR 자카르타 OR 발리"), 10, 8, False),
+    ("동남아", gsearch("동남아 OR 베트남 OR 태국 OR 필리핀 OR 말레이시아 OR 싱가포르"), 8, 4, False),
+    ("인도네시아 영문 보도", gsearch("Indonesia", "en"), 6, 5, True),
+    ("동남아 영문 보도", gsearch("Southeast Asia", "en"), 4, 3, True),
 ]
 UA = {"User-Agent": "Mozilla/5.0 (news-podcast)"}
 WEEK = "월화수목금토일"
@@ -54,9 +60,32 @@ def clean(s):
     return re.sub(r"\s+", " ", html.unescape(s)).strip()
 
 
+def article_text(link):
+    """기사 본문 발췌. 실패하면 빈 문자열(제목만 사용)."""
+    try:
+        import trafilatura
+
+        if "news.google.com" in link:
+            from googlenewsdecoder import gnewsdecoder
+
+            res = gnewsdecoder(link, interval=1)
+            if not res.get("status"):
+                return ""
+            link = res["decoded_url"]
+        r = requests.get(link, headers=UA, timeout=15)
+        r.raise_for_status()
+        return clean(trafilatura.extract(r.content, include_comments=False) or "")[:BODY_CHARS]
+    except Exception:
+        return ""
+
+
 def collect():
     seen, sections = set(), []
-    for name, url, n in FEEDS:
+    deadline = time.time() + FETCH_BUDGET
+    for name, url, n, deep, ai_only in FEEDS:
+        if ai_only and not HAS_KEY:
+            print(f"[안내] '{name}'은 AI 번역이 필요해 건너뜀 (GEMINI_API_KEY 없음)")
+            continue
         try:
             r = requests.get(url, headers=UA, timeout=20)
             r.raise_for_status()
@@ -71,13 +100,14 @@ def collect():
             if not title or key in seen:
                 continue
             seen.add(key)
-            desc = clean(e.get("summary", ""))
-            if len(desc) < 30 or desc.startswith(title[:12]):
-                desc = ""
-            items.append((title, desc[:160]))
+            body = ""
+            if len(items) < deep and time.time() < deadline:
+                body = article_text(e.get("link", ""))
+            items.append((title, "", body))
             if len(items) >= n:
                 break
         if items:
+            print(f"[수집] {name}: {len(items)}건, 본문 {sum(1 for i in items if i[2])}건")
             sections.append((name, items))
     return sections
 
@@ -86,19 +116,20 @@ def collect():
 def make_prompt(sections, today):
     date = f"{today.year}년 {today.month}월 {today.day}일 {WEEK[today.weekday()]}요일"
     news = "\n".join(
-        f"[{name}]\n" + "\n".join(f"- {t}" + (f" ({d})" if d else "") for t, d in items)
+        f"[{name}]\n" + "\n".join(f"- {t}" + (f"\n  본문 발췌: {b}" if b else "") for t, _, b in items)
         for name, items in sections
     )
-    return f"""너는 한국어 뉴스 팟캐스트 '{TITLE}'의 작가다. 아래 [오늘의 헤드라인]만을 근거로 진행자 두 명(A, B)의 대화형 대본을 써라.
+    return f"""너는 한국어 뉴스 팟캐스트 '{TITLE}'의 작가다. 아래 [오늘의 뉴스]만을 근거로 진행자 두 명(A, B)의 대화형 대본을 써라.
 규칙:
 - 오늘 날짜는 {date}. 첫 대사는 인사와 날짜 소개.
 - 분량은 한국어 약 {TARGET_CHARS}자(낭독 7~8분).
-- 가장 중요한 이슈 5~7개를 골라 각각 2~4문장으로 쉽게 설명하고, 비슷한 기사는 하나로 묶는다.
-- 헤드라인에 없는 사실·수치·인용을 지어내지 않는다. 불확실하면 '보도에 따르면'처럼 표현한다.
+- 중요한 이슈 6~8개를 골라 각각 4~6문장으로 배경까지 풀어 설명하고, 비슷한 기사는 하나로 묶는다. 인도네시아 소식을 가장 비중 있게 다룬다.
+- '본문 발췌'가 있는 기사는 그 내용을 이해해 자기 말로 다시 설명한다(문장을 그대로 옮기지 않는다). 영문 헤드라인·본문은 자연스러운 한국어로 번역해 '현지 보도에 따르면'처럼 소개한다.
+- 제공된 헤드라인·본문에 없는 사실·수치·인용을 지어내지 않는다. 불확실하면 '보도에 따르면'처럼 표현한다.
 - 모든 줄은 반드시 'A: 내용' 또는 'B: 내용' 형식. 마크다운, 이모지, 괄호 지문, 제목은 금지.
 - 마지막은 짧은 마무리 인사.
 
-[오늘의 헤드라인]
+[오늘의 뉴스]
 {news}"""
 
 
@@ -150,9 +181,12 @@ def fallback_script(sections, today):
     flip = 0
     for name, items in sections:
         lines.append(("B" if flip else "A", f"{name} 소식입니다."))
-        for t, _ in items[:4]:
+        for t, _, b in items[:4]:
             flip ^= 1
             lines.append(("B" if flip else "A", t + "."))
+            if b:  # AI가 없을 때는 본문 앞부분 두 문장만 덧붙임
+                flip ^= 1
+                lines.append(("B" if flip else "A", " ".join(re.split(r"(?<=[.다])\s+", b)[:2])))
     lines.append(("B", "오늘 브리핑은 여기까지입니다. 감사합니다."))
     return lines
 

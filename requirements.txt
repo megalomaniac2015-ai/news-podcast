@@ -1,3 +1,5 @@
 requests
+trafilatura
+googlenewsdecoder
 feedparser
 edge-tts
