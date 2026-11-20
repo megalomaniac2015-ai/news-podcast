@@ -1,0 +1,34 @@
+[
+ {
+  "date": "2026-11-21",
+  "ed": "korea",
+  "part": 1,
+  "parts": 1,
+  "file": "2026-11-21_korea_1.mp3",
+  "bytes": 12807360
+ },
+ {
+  "date": "2026-11-21",
+  "ed": "sea",
+  "part": 1,
+  "parts": 1,
+  "file": "2026-11-21_sea_1.mp3",
+  "bytes": 6692976
+ },
+ {
+  "date": "2026-11-20",
+  "ed": "korea",
+  "part": 1,
+  "parts": 1,
+  "file": "2026-11-20_korea_1.mp3",
+  "bytes": 13330944
+ },
+ {
+  "date": "2026-11-20",
+  "ed": "sea",
+  "part": 1,
+  "parts": 1,
+  "file": "2026-11-20_sea_1.mp3",
+  "bytes": 8536176
+ }
+]
