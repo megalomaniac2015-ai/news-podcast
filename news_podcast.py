@@ -50,6 +50,8 @@ HAS_KEY = bool(os.environ.get("GEMINI_API_KEY", "").strip())
 BODY_CHARS = int(os.environ.get("BODY_CHARS", "2500"))  # 기사 1건당 가져올 본문 길이
 PROMPT_EXCERPT = 1500  # AI에게 줄 때는 이만큼만
 FETCH_BUDGET = int(os.environ.get("FETCH_BUDGET", "240"))  # 본문 수집 제한시간(초)
+SEA_KW = ["indonesia", "jakarta", "prabowo", "asean", "thailand", "bangkok", "philippines", "manila", "vietnam", "hanoi",
+          "malaysia", "anwar", "myanmar", "singapore", "cambodia", "laos", "timor", "brunei", "southeast asia"]
 G = "https://news.google.com/rss/headlines/section/topic/{}?hl=ko&gl=KR&ceid=KR:ko"
 EDITIONS = [  # 하루에 에디션마다 mp3가 따로 만들어진다
     {
@@ -59,13 +61,14 @@ EDITIONS = [  # 하루에 에디션마다 mp3가 따로 만들어진다
         "english": False,
         "needs_ai": False,
         "max_chars": int(os.environ.get("MAX_CHARS_KO", "16000")),  # AI 없이 읽을 때 본문 총량 (약 45분)
-        "feeds": [  # (섹션 이름, RSS 주소, 최대 기사 수, 본문까지 읽을 기사 수)
-            ("주요 뉴스", "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko", 8, 6),
-            ("국내", G.format("NATION"), 6, 4),
-            ("세계", G.format("WORLD"), 5, 3),
-            ("경제", G.format("BUSINESS"), 5, 3),
-            ("IT·과학", G.format("TECHNOLOGY"), 4, 2),
-            ("연합뉴스", "https://www.yna.co.kr/rss/news.xml", 6, 3),
+        "feeds": [  # (섹션 이름, RSS 주소, 최대 기사 수, 본문까지 읽을 기사 수[, 키워드 필터])
+            ("정치", "https://www.yna.co.kr/rss/politics.xml", 5, 4),
+            ("사회", "https://www.yna.co.kr/rss/society.xml", 5, 4),
+            ("경제", "https://www.yna.co.kr/rss/economy.xml", 5, 3),
+            ("국제", "https://www.yna.co.kr/rss/international.xml", 5, 3),
+            ("동아일보", "https://rss.donga.com/total.xml", 5, 3),
+            ("경향신문", "https://www.khan.co.kr/rss/rssdata/total_news.xml", 5, 3),
+            ("구글뉴스 주요", "https://news.google.com/rss?hl=ko&gl=KR&ceid=KR:ko", 6, 3),
         ],
     },
     {
@@ -77,15 +80,22 @@ EDITIONS = [  # 하루에 에디션마다 mp3가 따로 만들어진다
         "needs_ai": False,
         "max_chars": int(os.environ.get("MAX_CHARS_EN", "32000")),  # 약 40분
         "feeds": [
-            ("Indonesia politics", gsearch("Indonesia politics OR Prabowo OR Jakarta government", "en"), 7, 5),
-            ("Indonesia society", gsearch("Indonesia protest OR court OR corruption OR police OR education OR social", "en"), 6, 4),
-            ("Southeast Asia politics", gsearch("ASEAN OR Thailand politics OR Philippines politics OR Vietnam politics OR Malaysia politics", "en"), 7, 4),
-            ("Southeast Asia society", gsearch("Southeast Asia society OR Myanmar OR Thailand court OR Philippines protest", "en"), 5, 3),
+            ("BBC Asia", "https://feeds.bbci.co.uk/news/world/asia/rss.xml", 6, 5, SEA_KW),
+            ("Al Jazeera", "https://www.aljazeera.com/xml/rss/all.xml", 6, 5, SEA_KW),
+            ("The Diplomat", "https://thediplomat.com/feed/", 6, 4, SEA_KW),
+            ("CNA Asia", "https://www.channelnewsasia.com/api/v1/rss-outbound-feed?_format=xml&category=6511", 6, 5, SEA_KW),
+            ("Indonesia news", gsearch("Indonesia politics OR Prabowo OR protest OR court OR corruption", "en"), 6, 4),
+            ("Southeast Asia news", gsearch("ASEAN OR Thailand OR Philippines OR Vietnam OR Malaysia OR Myanmar politics", "en"), 6, 3),
         ],
     },
 ]
 ED_TITLES = {e["id"]: e["title"] for e in EDITIONS}
-UA = {"User-Agent": "Mozilla/5.0 (news-podcast)"}
+UA = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36",
+    "Accept-Language": "ko-KR,ko;q=0.9,en;q=0.8",
+}
+DIAG = []  # 본문 수집 실패 이유 (로그에 요약 출력)
+
 WEEK = "월화수목금토일"
 
 
@@ -96,7 +106,7 @@ def clean(s):
 
 
 def article_text(link):
-    """기사 본문 발췌. 실패하면 빈 문자열(제목만 사용)."""
+    """기사 본문. 실패하면 빈 문자열(이유는 DIAG에 기록)."""
     try:
         import trafilatura
 
@@ -105,19 +115,33 @@ def article_text(link):
 
             res = gnewsdecoder(link, interval=1)
             if not res.get("status"):
+                DIAG.append(f"구글링크 해독 실패: {str(res.get('message'))[:80]}")
                 return ""
             link = res["decoded_url"]
         r = requests.get(link, headers=UA, timeout=15)
         r.raise_for_status()
-        return clean(trafilatura.extract(r.content, include_comments=False) or "")[:BODY_CHARS]
-    except Exception:
+        text = clean(trafilatura.extract(r.content, include_comments=False) or "")
+        if not text:
+            DIAG.append(f"빈 본문: {link[:70]}")
+        return text[:BODY_CHARS]
+    except Exception as ex:
+        DIAG.append(f"{type(ex).__name__}: {str(ex)[:70]} | {link[:50]}")
         return ""
+
+
+def rss_text(e, title):
+    """RSS 자체에 들어 있는 긴 본문/요약(있을 때만)."""
+    raw = e["content"][0].get("value", "") if e.get("content") else e.get("summary", "")
+    t = clean(raw)
+    return t[:BODY_CHARS] if len(t) >= 120 and not t.startswith(title[:12]) else ""
 
 
 def collect(ed):
     seen, sections = set(), []
     deadline = time.time() + FETCH_BUDGET
-    for name, url, n, deep in ed["feeds"]:
+    for feed in ed["feeds"]:
+        name, url, n, deep = feed[:4]
+        kw = feed[4] if len(feed) > 4 else None
         try:
             r = requests.get(url, headers=UA, timeout=20)
             r.raise_for_status()
@@ -131,16 +155,21 @@ def collect(ed):
             key = re.sub(r"\W", "", title)[:18]
             if not title or key in seen:
                 continue
+            if kw and not any(k in (title + " " + clean(e.get("summary", ""))).lower() for k in kw):
+                continue
             seen.add(key)
             body = ""
             if len(items) < deep and time.time() < deadline:
-                body = article_text(e.get("link", ""))
+                body = article_text(e.get("link", "")) or rss_text(e, title)
             items.append((title, "", body))
             if len(items) >= n:
                 break
+        print(f"[수집:{ed['id']}] {name}: 기사 {len(items)}건, 본문 {sum(1 for i in items if i[2])}건")
         if items:
-            print(f"[수집:{ed['id']}] {name}: {len(items)}건, 본문 {sum(1 for i in items if i[2])}건")
             sections.append((name, items))
+    if DIAG:
+        print(f"[진단] 본문 수집 실패 {len(DIAG)}건. 예: " + " / ".join(DIAG[:5]))
+        DIAG.clear()
     return sections
 
 
