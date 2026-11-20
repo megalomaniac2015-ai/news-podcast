@@ -37,7 +37,7 @@ VOICES_EN = {
 TARGET_CHARS_EN = int(os.environ.get("TARGET_CHARS_EN", "7000"))  # 영어 약 9분 분량
 RATE = os.environ.get("TTS_RATE", "+5%")
 TARGET_CHARS = int(os.environ.get("TARGET_CHARS", "4000"))  # 약 11~12분 분량
-MAX_PART_BYTES = int(os.environ.get("MAX_PART_BYTES", str(4_000_000)))  # 파일 1개 최대 ~4MB
+MAX_PART_BYTES = int(os.environ.get("MAX_PART_BYTES", str(80_000_000)))  # 파일 1개 최대 ~4MB
 KEEP_DAYS = int(os.environ.get("KEEP_DAYS", "7"))
 GEMINI_MODELS = os.environ.get("GEMINI_MODELS", "gemini-2.5-flash,gemini-2.5-flash-lite")
 
@@ -49,7 +49,7 @@ def gsearch(q, lang="ko"):
 HAS_KEY = bool(os.environ.get("GEMINI_API_KEY", "").strip())
 BODY_CHARS = int(os.environ.get("BODY_CHARS", "2500"))  # 기사 1건당 가져올 본문 길이
 PROMPT_EXCERPT = 1500  # AI에게 줄 때는 이만큼만
-FETCH_BUDGET = int(os.environ.get("FETCH_BUDGET", "240"))  # 본문 수집 제한시간(초)
+FETCH_BUDGET = int(os.environ.get("FETCH_BUDGET", "360"))  # 본문 수집 제한시간(초)
 SEA_KW = ["indonesia", "jakarta", "prabowo", "asean", "thailand", "bangkok", "philippines", "manila", "vietnam", "hanoi",
           "malaysia", "anwar", "myanmar", "singapore", "cambodia", "laos", "timor", "brunei", "southeast asia"]
 G = "https://news.google.com/rss/headlines/section/topic/{}?hl=ko&gl=KR&ceid=KR:ko"
@@ -105,8 +105,23 @@ def clean(s):
     return re.sub(r"\s+", " ", html.unescape(s)).strip()
 
 
+def jina_text(link):
+    """직접 접속이 막힌 사이트(해외 IP 차단 등)용 대체 경로: 무료 리더 서비스 r.jina.ai 경유."""
+    try:
+        time.sleep(3)  # 무료 서비스 호출 제한(분당 20회) 준수
+        r = requests.get("https://r.jina.ai/" + link, headers={"User-Agent": UA["User-Agent"], "Accept": "text/plain"}, timeout=45)
+        r.raise_for_status()
+        t = r.text.split("Markdown Content:", 1)[-1]
+        t = re.sub(r"!?\[([^\]]*)\]\([^)]*\)", r"\1", t)  # 링크·이미지 표기 제거
+        t = re.sub(r"[#*_>`|]+", " ", t)
+        return clean(t)
+    except Exception as ex:
+        DIAG.append(f"jina {type(ex).__name__}: {str(ex)[:50]} | {link[:40]}")
+        return ""
+
+
 def article_text(link):
-    """기사 본문. 실패하면 빈 문자열(이유는 DIAG에 기록)."""
+    """기사 본문. 직접 접속 → 실패 시 jina 경유. 모두 실패하면 빈 문자열(이유는 DIAG에 기록)."""
     try:
         import trafilatura
 
@@ -118,14 +133,20 @@ def article_text(link):
                 DIAG.append(f"구글링크 해독 실패: {str(res.get('message'))[:80]}")
                 return ""
             link = res["decoded_url"]
-        r = requests.get(link, headers=UA, timeout=15)
-        r.raise_for_status()
-        text = clean(trafilatura.extract(r.content, include_comments=False) or "")
-        if not text:
-            DIAG.append(f"빈 본문: {link[:70]}")
+        text = ""
+        try:
+            r = requests.get(link, headers=UA, timeout=15)
+            r.raise_for_status()
+            text = clean(trafilatura.extract(r.content, include_comments=False) or "")
+            if not text:
+                DIAG.append(f"빈 본문: {link[:70]}")
+        except Exception as ex:
+            DIAG.append(f"{type(ex).__name__}: {str(ex)[:60]} | {link[:50]}")
+        if len(text) < 200:
+            text = jina_text(link) or text
         return text[:BODY_CHARS]
     except Exception as ex:
-        DIAG.append(f"{type(ex).__name__}: {str(ex)[:70]} | {link[:50]}")
+        DIAG.append(f"{type(ex).__name__}: {str(ex)[:70]}")
         return ""
 
 
